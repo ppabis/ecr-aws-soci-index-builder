@@ -1,14 +1,20 @@
-FROM golang:1.20
+FROM golang:1.22-alpine AS builder
 
-RUN apt-get -y update
-RUN apt-get -y install python3-pip make git zip gcc g++ zlib1g zlib1g-dev
+RUN apk add --no-cache git gcc musl-dev zlib-dev zlib-static
+#RUN apt-get -y install python3-pip make git zip gcc g++ zlib1g zlib1g-dev
 
 COPY . /build
 
 WORKDIR /build
 
-RUN GOPROXY=direct go mod download
+RUN go mod download
 
-RUN GOPROXY=direct make -f Makefile
+RUN CGO_ENABLED=1 go build -tags "osusergo netgo static_build lambda.norpc" -ldflags '-extldflags "-static -lz"' -o bootstrap
 
-CMD mkdir -p /output/ && mv /build/soci_index_generator_lambda.zip /output/
+FROM alpine:latest AS runner
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /build/bootstrap /usr/local/bin/bootstrap
+
+ENTRYPOINT ["bootstrap"]
