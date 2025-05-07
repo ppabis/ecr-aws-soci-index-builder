@@ -6,8 +6,8 @@ package registry
 import (
 	"context"
 	"testing"
+	"time"
 
-	"github.com/aws/aws-lambda-go/lambdacontext"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -19,9 +19,9 @@ type ExpectedResponse struct {
 func TestHeadManifest(t *testing.T) {
 	doTest := func(registryUrl string, repository string, digestOrTag string, expected ExpectedResponse) {
 		// making the test context
-		lc := lambdacontext.LambdaContext{}
-		lc.AwsRequestID = "abcd-1234-test-head-manifest"
-		ctx := lambdacontext.NewContext(context.Background(), &lc)
+		ctx := context.Background()
+		ctx, cancel := context.WithDeadline(ctx, time.Now().Add(time.Minute*5))
+		defer cancel()
 		registry, err := Init(ctx, registryUrl)
 		if err != nil {
 			panic(err)
@@ -60,9 +60,9 @@ func TestHeadManifest(t *testing.T) {
 func TestGetManifest(t *testing.T) {
 	doTest := func(registryUrl string, repository string, digestOrTag string, expected ExpectedResponse) {
 		// making the test context
-		lc := lambdacontext.LambdaContext{}
-		lc.AwsRequestID = "abcd-1234-test-get-manifest"
-		ctx := lambdacontext.NewContext(context.Background(), &lc)
+		ctx := context.Background()
+		ctx, cancel := context.WithDeadline(ctx, time.Now().Add(time.Minute*5))
+		defer cancel()
 		registry, err := Init(ctx, registryUrl)
 		if err != nil {
 			panic(err)

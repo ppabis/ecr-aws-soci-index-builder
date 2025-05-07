@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -15,12 +14,9 @@ import (
 	"errors"
 	"path"
 
-	"github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda/events"
 	"github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda/utils/fs"
 	"github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda/utils/log"
 	registryutils "github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda/utils/registry"
-	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-lambda-go/lambdacontext"
 	"github.com/containerd/containerd/images"
 	"oras.land/oras-go/v2/content/oci"
 
@@ -48,20 +44,17 @@ const (
 	artifactsDbName    = "artifacts.db"
 )
 
-func HandleRequest(ctx context.Context, event events.ECRImageActionEvent) (string, error) {
-	ctx, err := validateEvent(ctx, event)
-	if err != nil {
-		return lambdaError(ctx, "ECRImageActionEvent validation error", err)
-	}
+func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64) (string, error) {
+	digest := strings.Split(imageUrl, ":")[1]
+	registryHost := strings.Split(imageUrl, "/")[0]
+	repo := strings.TrimPrefix(imageUrl, registryHost+"/")
+	repo = strings.TrimSuffix(repo, ":"+digest)
 
-	repo := event.Detail.RepositoryName
-	digest := event.Detail.ImageDigest
-	registryUrl := buildEcrRegistryUrl(event)
-	ctx = context.WithValue(ctx, "RegistryURL", registryUrl)
+	ctx = context.WithValue(ctx, "RegistryURL", registryHost)
 
-	registry, err := registryutils.Init(ctx, registryUrl)
+	registry, err := registryutils.Init(ctx, registryHost)
 	if err != nil {
-		return lambdaError(ctx, "Remote registry initialization error", err)
+		fmt.Printf("Error initializing registry: %v", err)
 	}
 
 	err = registry.ValidateImageManifest(ctx, repo, digest)
@@ -101,7 +94,7 @@ func HandleRequest(ctx context.Context, event events.ECRImageActionEvent) (strin
 		Target: *desc,
 	}
 
-	indexDescriptor, err := buildIndex(ctx, dataDir, sociStore, image)
+	indexDescriptor, err := buildIndex(ctx, dataDir, sociStore, image, minLayerSize)
 	if err != nil {
 		if err.Error() == ErrEmptyIndex.Error() {
 			log.Warn(ctx, SkipPushOnEmptyIndexMessage)
@@ -120,89 +113,6 @@ func HandleRequest(ctx context.Context, event events.ECRImageActionEvent) (strin
 	return BuildAndPushSuccessMessage, nil
 }
 
-// Validate the given event, populating the context with relevant valid event properties
-func validateEvent(ctx context.Context, event events.ECRImageActionEvent) (context.Context, error) {
-	var errors []error
-
-	if event.Source != "aws.ecr" {
-		errors = append(errors, fmt.Errorf("The event's 'source' must be 'aws.ecr'"))
-	}
-	if event.Account == "" {
-		errors = append(errors, fmt.Errorf("The event's 'account' must not be empty"))
-	}
-	if event.DetailType != "ECR Image Action" {
-		errors = append(errors, fmt.Errorf("The event's 'detail-type' must be 'ECR Image Action'"))
-	}
-	if event.Detail.ActionType != "PUSH" {
-		errors = append(errors, fmt.Errorf("The event's 'detail.action-type' must be 'PUSH'"))
-	}
-	if event.Detail.Result != "SUCCESS" {
-		errors = append(errors, fmt.Errorf("The event's 'detail.result' must be 'SUCCESS'"))
-	}
-	if event.Detail.RepositoryName == "" {
-		errors = append(errors, fmt.Errorf("The event's 'detail.repository-name' must not be empty"))
-	}
-	if event.Detail.ImageDigest == "" {
-		errors = append(errors, fmt.Errorf("The event's 'detail.image-digest' must not be empty"))
-	}
-
-	validAccountId, err := regexp.MatchString(`[0-9]{12}`, event.Account)
-	if err != nil {
-		errors = append(errors, err)
-	}
-	if !validAccountId {
-		errors = append(errors, fmt.Errorf("The event's 'account' must be a valid AWS account ID"))
-	}
-
-	validRepositoryName, err := regexp.MatchString(`(?:[a-z0-9]+(?:[._-][a-z0-9]+)*/)*[a-z0-9]+(?:[._-][a-z0-9]+)*`, event.Detail.RepositoryName)
-	if err != nil {
-		errors = append(errors, err)
-	}
-	if validRepositoryName {
-		ctx = context.WithValue(ctx, "RepositoryName", event.Detail.RepositoryName)
-	} else {
-		errors = append(errors, fmt.Errorf("The event's 'detail.repository-name' must be a valid repository name"))
-	}
-
-	validImageDigest, err := regexp.MatchString(`[[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][A-Fa-f0-9]{32,}`, event.Detail.ImageDigest)
-	if err != nil {
-		errors = append(errors, err)
-	}
-	if validImageDigest {
-		ctx = context.WithValue(ctx, "ImageDigest", event.Detail.ImageDigest)
-	} else {
-		errors = append(errors, fmt.Errorf("The event's 'detail.image-digest' must be a valid image digest"))
-	}
-
-	// missing/empty tag is OK
-	if event.Detail.ImageTag != "" {
-		validImageTag, err := regexp.MatchString(`[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`, event.Detail.ImageTag)
-		if err != nil {
-			errors = append(errors, err)
-		}
-		if validImageTag {
-			ctx = context.WithValue(ctx, "ImageTag", event.Detail.ImageTag)
-		} else {
-			errors = append(errors, fmt.Errorf("The event's 'detail.image-tag' must be empty or a valid image tag"))
-		}
-	}
-
-	if len(errors) == 0 {
-		return ctx, nil
-	} else {
-		return ctx, errors[0]
-	}
-}
-
-// Returns ecr registry url from an image action event
-func buildEcrRegistryUrl(event events.ECRImageActionEvent) string {
-	var awsDomain = ".amazonaws.com"
-	if strings.HasPrefix(event.Region, "cn") {
-		awsDomain = ".amazonaws.com.cn"
-	}
-	return event.Account + ".dkr.ecr." + event.Region + awsDomain
-}
-
 // Create a temp directory in /tmp
 // The directory is prefixed by the Lambda's request id
 func createTempDir(ctx context.Context) (string, error) {
@@ -215,8 +125,7 @@ func createTempDir(ctx context.Context) (string, error) {
 	}
 
 	log.Info(ctx, "Creating a directory to store images and SOCI artifacts")
-	lambdaContext, _ := lambdacontext.FromContext(ctx)
-	tempDir, err := os.MkdirTemp("/tmp", lambdaContext.AwsRequestID) // The temp dir name is prefixed by the request id
+	tempDir, err := os.MkdirTemp("/tmp", "soci-lambda") // The temp dir name is prefixed by the request id
 	return tempDir, err
 }
 
@@ -278,7 +187,7 @@ func initSociArtifactsDb(dataDir string) (*soci.ArtifactsDb, error) {
 }
 
 // Build soci index for an image and returns its ocispec.Descriptor
-func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore, image images.Image) (*ocispec.Descriptor, error) {
+func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore, image images.Image, minLayerSize int64) (*ocispec.Descriptor, error) {
 	log.Info(ctx, "Building SOCI index")
 	platform := platforms.DefaultSpec() // TODO: make this a user option
 
@@ -292,7 +201,7 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return nil, err
 	}
 
-	builder, err := soci.NewIndexBuilder(containerdStore, sociStore, artifactsDb, soci.WithPlatform(platform))
+	builder, err := soci.NewIndexBuilder(containerdStore, sociStore, artifactsDb, soci.WithPlatform(platform), soci.WithMinLayerSize(minLayerSize))
 	if err != nil {
 		return nil, err
 	}
@@ -329,8 +238,4 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 func lambdaError(ctx context.Context, msg string, err error) (string, error) {
 	log.Error(ctx, msg, err)
 	return msg, err
-}
-
-func main() {
-	lambda.Start(HandleRequest)
 }
