@@ -3,7 +3,6 @@ module github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda
 go 1.22
 
 require (
-	github.com/aws/aws-lambda-go v1.36.1
 	github.com/aws/aws-sdk-go v1.44.175
 	github.com/awslabs/soci-snapshotter v0.6.1
 	github.com/containerd/containerd v1.7.25
