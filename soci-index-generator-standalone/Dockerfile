@@ -9,12 +9,12 @@ WORKDIR /build
 
 RUN go mod download
 
-RUN CGO_ENABLED=1 go build -tags "osusergo netgo static_build lambda.norpc" -ldflags '-extldflags "-static -lz"' -o bootstrap
+RUN CGO_ENABLED=1 go build -tags "osusergo netgo static_build lambda.norpc" -ldflags '-extldflags "-static -lz"' -o soci-index-build
 
 FROM alpine:latest AS runner
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=builder /build/bootstrap /usr/local/bin/bootstrap
+COPY --from=builder /build/soci-index-build /usr/local/bin/soci-index-build
 
-ENTRYPOINT ["bootstrap"]
+ENTRYPOINT ["soci-index-build"]
