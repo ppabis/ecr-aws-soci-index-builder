@@ -22,6 +22,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/awslabs/soci-snapshotter/soci/store"
+	"github.com/containerd/containerd/images"
+
+	"slices"
 
 	"github.com/aws-ia/cfn-aws-soci-index-builder/soci-index-generator-lambda/utils/log"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -31,6 +34,7 @@ const (
 	MediaTypeDockerManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
 	MediaTypeDockerManifest     = "application/vnd.docker.distribution.manifest.v2+json"
 	MediaTypeOCIManifest        = "application/vnd.oci.image.manifest.v1+json"
+	MediaTypeOCIImageIndex      = "application/vnd.oci.image.index.v1+json"
 
 	MediaTypeDockerImageConfig = "application/vnd.docker.container.image.v1+json"
 	MediaTypeOCIImageConfig    = "application/vnd.oci.image.config.v1+json"
@@ -43,7 +47,7 @@ type Registry struct {
 	registry *remote.Registry
 }
 
-var RegistryNotSupportingOciArtifacts = errors.New("Registry does not support OCI artifacts")
+var ErrRegistryNotSupportingOciArtifacts = errors.New("Registry does not support OCI artifacts")
 
 // Initialize a remote registry
 func Init(ctx context.Context, registryUrl string) (*Registry, error) {
@@ -81,7 +85,8 @@ func (registry *Registry) Pull(ctx context.Context, repositoryName string, sociS
 // Push a OCI artifact to remote registry
 // descriptor: ocispec Descriptor of the artifact
 // ociStore: the local OCI store
-func (registry *Registry) Push(ctx context.Context, sociStore *store.SociStore, indexDesc ocispec.Descriptor, repositoryName string) error {
+// tag: optional tag to apply to the artifact (empty string means no tag)
+func (registry *Registry) Push(ctx context.Context, sociStore *store.SociStore, indexDesc ocispec.Descriptor, repositoryName string, tag string) error {
 	log.Info(ctx, "Pushing artifact")
 
 	repo, err := registry.registry.Repository(ctx, repositoryName)
@@ -94,10 +99,20 @@ func (registry *Registry) Push(ctx context.Context, sociStore *store.SociStore, 
 		// TODO: There might be a better way to check if a registry supporting OCI or not
 		if strings.Contains(err.Error(), "Response status code 405: unsupported: Invalid parameter at 'ImageManifest' failed to satisfy constraint: 'Invalid JSON syntax'") {
 			log.Warn(ctx, fmt.Sprintf("Error when pushing: %v", err))
-			return RegistryNotSupportingOciArtifacts
+			return ErrRegistryNotSupportingOciArtifacts
 		}
 		return err
 	}
+
+	// If a tag is provided, tag the artifact in the remote repository
+	if tag != "" {
+		log.Info(ctx, fmt.Sprintf("Tagging index with %s", tag))
+		err = repo.Tag(ctx, indexDesc, tag)
+		if err != nil {
+			return fmt.Errorf("failed to tag artifact: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -143,24 +158,66 @@ func (registry *Registry) GetManifest(ctx context.Context, repositoryName string
 	return manifest, nil
 }
 
-// Validate if a digest is a valid image manifest
-func (registry *Registry) ValidateImageManifest(ctx context.Context, repositoryName string, digest string) error {
+func (registry *Registry) validateImageManifest(ctx context.Context, repositoryName string, digest string) error {
+	// Get the manifest content
 	manifest, err := registry.GetManifest(ctx, repositoryName, digest)
 	if err != nil {
 		return err
 	}
 
+	// Valid image manifests must have a config with a valid media type
 	if manifest.Config.MediaType == "" {
-		return fmt.Errorf("Empty config media type.")
+		return fmt.Errorf("not a valid image manifest: empty config media type")
 	}
 
-	for _, configMediaType := range ImageConfigMediaTypes {
-		if manifest.Config.MediaType == configMediaType {
+	if !slices.Contains(ImageConfigMediaTypes, manifest.Config.MediaType) {
+		return fmt.Errorf("not a valid image manifest: unexpected config media type: %s, expected one of: %v",
+			manifest.Config.MediaType, ImageConfigMediaTypes)
+	}
+
+	return nil
+}
+
+func (registry *Registry) validateImageIndex(ctx context.Context, repositoryName string, digest string) error {
+	// Get the descriptor to check media type
+	descriptor, err := registry.HeadManifest(ctx, repositoryName, digest)
+	if err != nil {
+		return err
+	}
+
+	// Check if it's an image index by media type
+	if !images.IsIndexType(descriptor.MediaType) {
+		return fmt.Errorf("not a valid image index: unexpected media type: %s", descriptor.MediaType)
+	}
+
+	return nil
+}
+
+// ValidateImageDigest validates if a digest is valid based on SOCI index version requirements
+// For SOCI V1, only image manifests are supported
+// For SOCI V2, both image manifests and image indexes are supported
+func (registry *Registry) ValidateImageDigest(ctx context.Context, repositoryName string, digest string, sociIndexVersion string) error {
+	var err error
+	if sociIndexVersion == "V1" {
+		err = registry.validateImageManifest(ctx, repositoryName, digest)
+		if err != nil {
+			return err
+		}
+		log.Info(ctx, "Validated image manifest")
+	}
+	if sociIndexVersion == "V2" {
+		err = registry.validateImageIndex(ctx, repositoryName, digest)
+		if err == nil {
+			log.Info(ctx, "Validated image index")
+			return nil
+		}
+		err = registry.validateImageManifest(ctx, repositoryName, digest)
+		if err == nil {
+			log.Info(ctx, "Validated image manifest")
 			return nil
 		}
 	}
-
-	return fmt.Errorf("Unexpected config media type: %s, expected one of: %v.", manifest.Config.MediaType, ImageConfigMediaTypes)
+	return err
 }
 
 // Check if a registry is an ECR registry
@@ -180,9 +237,17 @@ func authorizeEcr(ecrRegistry *remote.Registry) error {
 	var ecrClient *ecr.ECR
 	ecrEndpoint := os.Getenv("ECR_ENDPOINT") // set this env var for custom, i.e. non default, aws ecr endpoint
 	if ecrEndpoint != "" {
-		ecrClient = ecr.New(session.New(&aws.Config{Endpoint: aws.String(ecrEndpoint)}))
+		sess, err := session.NewSession(&aws.Config{Endpoint: aws.String(ecrEndpoint)})
+		if err != nil {
+			return err
+		}
+		ecrClient = ecr.New(sess)
 	} else {
-		ecrClient = ecr.New(session.New())
+		sess, err := session.NewSession()
+		if err != nil {
+			return err
+		}
+		ecrClient = ecr.New(sess)
 	}
 	getAuthorizationTokenResponse, err := ecrClient.GetAuthorizationToken(input)
 	if err != nil {
@@ -190,15 +255,15 @@ func authorizeEcr(ecrRegistry *remote.Registry) error {
 	}
 
 	if len(getAuthorizationTokenResponse.AuthorizationData) == 0 {
-		return errors.New("Couldn't authorize with ECR: empty authorization data returned")
+		return errors.New("couldn't authorize with ECR: empty authorization data returned")
 	}
 
 	ecrAuthorizationToken := getAuthorizationTokenResponse.AuthorizationData[0].AuthorizationToken
 	if len(*ecrAuthorizationToken) == 0 {
-		return errors.New("Couldn't authorize with ECR: empty authorization token returned")
+		return errors.New("couldn't authorize with ECR: empty authorization token returned")
 	}
 
-	ecrRegistry.RepositoryOptions.Client = &auth.Client{
+	ecrRegistry.Client = &auth.Client{
 		Header: http.Header{
 			"Authorization": {"Basic " + *ecrAuthorizationToken},
 			"User-Agent":    {"SOCI Index Builder (oras-go)"},
