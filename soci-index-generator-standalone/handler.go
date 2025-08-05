@@ -44,7 +44,7 @@ const (
 	artifactsDbName    = "artifacts.db"
 )
 
-func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64) (string, error) {
+func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, sociIndexVersion string) (string, error) {
 	digest := strings.Split(imageUrl, ":")[1]
 	registryHost := strings.Split(imageUrl, "/")[0]
 	repo := strings.TrimPrefix(imageUrl, registryHost+"/")
