@@ -66,14 +66,7 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 
 	var tag string
 	if sociIndexVersion == "V2" {
-		// Get the original image tag if available
-		originalTag, ok := ctx.Value(ImageTagKey).(string)
-		if !ok || originalTag == "" {
-			log.Info(ctx, "Skipping SOCI index generation for V2 as image has no tag")
-			return "Skipped SOCI index generation for V2 as image has no tag", nil
-		}
-
-		tag = originalTag + "-soci"
+		tag = tagOrDigest + "-soci"
 		log.Info(ctx, fmt.Sprintf("Using original image tag with suffix: %s", tag))
 	}
 
@@ -219,12 +212,6 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return nil, err
 	}
 
-	// Build the SOCI index
-	index, err := builder.Build(ctx, image)
-	if err != nil {
-		return nil, err
-	}
-
 	// Build the SOCI index based on the specified version
 	if sociIndexVersion == "V2" {
 		// Use Convert() for V2 index generation
@@ -252,9 +239,8 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		sort.Slice(indexDescriptorInfos, func(i, j int) bool {
 			return indexDescriptorInfos[i].CreatedAt.Before(indexDescriptorInfos[j].CreatedAt)
 		})
+		return &indexDescriptorInfos[len(indexDescriptorInfos)-1].Descriptor, nil
 	}
-
-	return &indexDescriptorInfos[len(indexDescriptorInfos)-1].Descriptor, nil
 }
 
 // Log and return the lambda handler error
