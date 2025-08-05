@@ -45,10 +45,10 @@ const (
 )
 
 func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, sociIndexVersion string) (string, error) {
-	digest := strings.Split(imageUrl, ":")[1]
+	tagOrDigest := strings.Split(imageUrl, ":")[1]
 	registryHost := strings.Split(imageUrl, "/")[0]
 	repo := strings.TrimPrefix(imageUrl, registryHost+"/")
-	repo = strings.TrimSuffix(repo, ":"+digest)
+	repo = strings.TrimSuffix(repo, ":"+tagOrDigest)
 
 	ctx = context.WithValue(ctx, "RegistryURL", registryHost)
 
@@ -57,7 +57,7 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 		fmt.Printf("Error initializing registry: %v", err)
 	}
 
-	err = registry.ValidateImageManifest(ctx, repo, digest)
+	err = registry.ValidateImageManifest(ctx, repo, tagOrDigest)
 	if err != nil {
 		log.Warn(ctx, fmt.Sprintf("Image manifest validation error: %v", err))
 		// Returning a non error to skip retries
@@ -84,13 +84,13 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 		return lambdaError(ctx, "OCI storage initialization error", err)
 	}
 
-	desc, err := registry.Pull(ctx, repo, sociStore, digest)
+	desc, err := registry.Pull(ctx, repo, sociStore, tagOrDigest)
 	if err != nil {
 		return lambdaError(ctx, "Image pull error", err)
 	}
 
 	image := images.Image{
-		Name:   repo + "@" + digest,
+		Name:   repo + "@" + tagOrDigest,
 		Target: *desc,
 	}
 
