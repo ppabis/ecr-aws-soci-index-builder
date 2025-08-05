@@ -107,7 +107,7 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 		Target: *desc,
 	}
 
-	indexDescriptor, err := buildIndex(ctx, dataDir, sociStore, image, minLayerSize)
+	indexDescriptor, err := buildIndex(ctx, dataDir, sociStore, image, minLayerSize, sociIndexVersion)
 	if err != nil {
 		if err.Error() == ErrEmptyIndex.Error() {
 			log.Warn(ctx, SkipPushOnEmptyIndexMessage)
@@ -117,7 +117,7 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 	}
 	ctx = context.WithValue(ctx, "SOCIIndexDigest", indexDescriptor.Digest.String())
 
-	err = registry.Push(ctx, sociStore, *indexDescriptor, repo)
+	err = registry.Push(ctx, sociStore, *indexDescriptor, repo, tag)
 	if err != nil {
 		return lambdaError(ctx, PushFailedMessage, err)
 	}
@@ -200,7 +200,7 @@ func initSociArtifactsDb(dataDir string) (*soci.ArtifactsDb, error) {
 }
 
 // Build soci index for an image and returns its ocispec.Descriptor
-func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore, image images.Image, minLayerSize int64) (*ocispec.Descriptor, error) {
+func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore, image images.Image, minLayerSize int64, sociIndexVersion string) (*ocispec.Descriptor, error) {
 	log.Info(ctx, "Building SOCI index")
 	platform := platforms.DefaultSpec() // TODO: make this a user option
 
@@ -214,7 +214,7 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return nil, err
 	}
 
-	builder, err := soci.NewIndexBuilder(containerdStore, sociStore, artifactsDb, soci.WithPlatform(platform), soci.WithMinLayerSize(minLayerSize))
+	builder, err := soci.NewIndexBuilder(containerdStore, sociStore, soci.WithArtifactsDb(artifactsDb), soci.WithBuildToolIdentifier("AWS SOCI CLI v0.2"), soci.WithMinLayerSize(minLayerSize))
 	if err != nil {
 		return nil, err
 	}
@@ -225,24 +225,34 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return nil, err
 	}
 
-	// Write the SOCI index to the OCI store
-	err = soci.WriteSociIndex(ctx, index, sociStore, artifactsDb)
-	if err != nil {
-		return nil, err
+	// Build the SOCI index based on the specified version
+	if sociIndexVersion == "V2" {
+		// Use Convert() for V2 index generation
+		convertedOCIIndex, err := builder.Convert(ctx, image, soci.ConvertWithPlatforms(platform))
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert OCI index: %w", err)
+		}
+		fmt.Printf("Generated OCI Index Digest: %s\n", convertedOCIIndex.Digest.String())
+		return convertedOCIIndex, nil
+	} else {
+		// Default to Build() for V1 index generation
+		generatedSOCIIndex, err := builder.Build(ctx, image, soci.WithPlatform(platform))
+		if err != nil {
+			return nil, fmt.Errorf("failed to build SOCI index: %w", err)
+		}
+		fmt.Printf("Generated SOCI Index Digest: %s\n", generatedSOCIIndex.ImageDesc.Digest.String())
+		// Get SOCI indices for the image from the OCI store
+		indexDescriptorInfos, _, err := soci.GetIndexDescriptorCollection(ctx, containerdStore, artifactsDb, image, []ocispec.Platform{platform})
+		if err != nil {
+			return nil, err
+		}
+		if len(indexDescriptorInfos) == 0 {
+			return nil, errors.New("no SOCI indices found in OCI store")
+		}
+		sort.Slice(indexDescriptorInfos, func(i, j int) bool {
+			return indexDescriptorInfos[i].CreatedAt.Before(indexDescriptorInfos[j].CreatedAt)
+		})
 	}
-
-	// Get SOCI indices for the image from the OCI store
-	// TODO: consider making soci's WriteSociIndex to return the descriptor directly
-	indexDescriptorInfos, _, err := soci.GetIndexDescriptorCollection(ctx, containerdStore, artifactsDb, image, []ocispec.Platform{platform})
-	if err != nil {
-		return nil, err
-	}
-	if len(indexDescriptorInfos) == 0 {
-		return nil, errors.New("No SOCI indices found in OCI store")
-	}
-	sort.Slice(indexDescriptorInfos, func(i, j int) bool {
-		return indexDescriptorInfos[i].CreatedAt.Before(indexDescriptorInfos[j].CreatedAt)
-	})
 
 	return &indexDescriptorInfos[len(indexDescriptorInfos)-1].Descriptor, nil
 }
