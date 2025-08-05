@@ -12,11 +12,15 @@ func main() {
 	// parse the repository URI from a -repository flag
 	repo := flag.String("repository", "", "OCI repository URI (with tag or digest) to build the SOCI index for")
 	minLayerSize := flag.Int64("min-layer-size", 10485760, "minimum layer size to build a ztoc for a layer (default 10MB)")
-	sociIndexVersion := flag.String("soci-index-version", "2", "SOCI index version to build (default 2, valid: 1, 2)")
+	sociIndexVersion := flag.String("soci-index-version", "V2", "SOCI index version to build (default V2, valid: V1, V2)")
 	flag.Parse()
 
 	if *repo == "" {
 		log.Fatal("missing required -repository argument")
+	}
+
+	if *sociIndexVersion != "V1" && *sociIndexVersion != "V2" {
+		log.Fatalf("invalid -soci-index-version argument: %s, valid: V1, V2", *sociIndexVersion)
 	}
 
 	ctx := context.Background()

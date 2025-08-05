@@ -57,11 +57,24 @@ func handleRequest(ctx context.Context, imageUrl string, minLayerSize int64, soc
 		fmt.Printf("Error initializing registry: %v", err)
 	}
 
-	err = registry.ValidateImageManifest(ctx, repo, tagOrDigest)
+	err = registry.ValidateImageDigest(ctx, repo, tagOrDigest, sociIndexVersion)
 	if err != nil {
 		log.Warn(ctx, fmt.Sprintf("Image manifest validation error: %v", err))
 		// Returning a non error to skip retries
 		return "Exited early due to manifest validation error", nil
+	}
+
+	var tag string
+	if sociIndexVersion == "V2" {
+		// Get the original image tag if available
+		originalTag, ok := ctx.Value(ImageTagKey).(string)
+		if !ok || originalTag == "" {
+			log.Info(ctx, "Skipping SOCI index generation for V2 as image has no tag")
+			return "Skipped SOCI index generation for V2 as image has no tag", nil
+		}
+
+		tag = originalTag + "-soci"
+		log.Info(ctx, fmt.Sprintf("Using original image tag with suffix: %s", tag))
 	}
 
 	// Directory in lambda storage to store images and SOCI artifacts
