@@ -195,7 +195,7 @@ func initSociArtifactsDb(dataDir string) (*soci.ArtifactsDb, error) {
 // Build soci index for an image and returns its ocispec.Descriptor
 func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore, image images.Image, minLayerSize int64, sociIndexVersion string) (*ocispec.Descriptor, error) {
 	log.Info(ctx, "Building SOCI index")
-	platform := platforms.DefaultSpec() // TODO: make this a user option
+	platformOpt := soci.ConvertWithPlatforms(platforms.DefaultSpec())
 
 	artifactsDb, err := initSociArtifactsDb(dataDir)
 	if err != nil {
@@ -212,10 +212,21 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return nil, err
 	}
 
+	platformList, err := images.Platforms(ctx, containerdStore, image.Target)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(platformList) > 0 {
+		platformOpt = soci.ConvertWithPlatforms(platformList...)
+	}
+
+	fmt.Printf("Platforms found: %v\n", platformList)
+
 	// Build the SOCI index based on the specified version
 	if sociIndexVersion == "V2" {
 		// Use Convert() for V2 index generation
-		convertedOCIIndex, err := builder.Convert(ctx, image, soci.ConvertWithPlatforms(platform))
+		convertedOCIIndex, err := builder.Convert(ctx, image, platformOpt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert OCI index: %w", err)
 		}
@@ -223,6 +234,7 @@ func buildIndex(ctx context.Context, dataDir string, sociStore *store.SociStore,
 		return convertedOCIIndex, nil
 	} else {
 		// Default to Build() for V1 index generation
+		platform := platforms.DefaultSpec()
 		generatedSOCIIndex, err := builder.Build(ctx, image, soci.WithPlatform(platform))
 		if err != nil {
 			return nil, fmt.Errorf("failed to build SOCI index: %w", err)
